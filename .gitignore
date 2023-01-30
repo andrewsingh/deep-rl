@@ -4,4 +4,4 @@
 *__pycache__*
 runs/*
 notebooks/*
-deep-rl/wandb/*
+wandb/*

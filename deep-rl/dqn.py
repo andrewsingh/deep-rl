@@ -18,9 +18,9 @@ def parse_args():
 
     parser.add_argument("--total-timesteps", type=int, default=500000)
     parser.add_argument("--train-timesteps", type=int, default=10)
-    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument("--eval-epsilon", type=int, default=0.05)
-    parser.add_argument("--eval-freq", type=int, default=100)
+    parser.add_argument("--eval-freq", type=int, default=200)
     parser.add_argument("--update-target-timesteps", type=int, default=500)
     parser.add_argument("--start-learning-timestep", type=int, default=10000)
     parser.add_argument("--env-name", type=str, default="CartPole-v1")
@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument("--epsilon-start", type=float, default=1)
     parser.add_argument("--epsilon-end", type=float, default=0.05)
     parser.add_argument("--epsilon-anneal-frac", type=float, default=0.5)
-    parser.add_argument("--memory-capacity", type=int, default=10000)
+    parser.add_argument("--replay-capacity", type=int, default=10000)
     parser.add_argument("--minibatch-size", type=int, default=128)
     parser.add_argument("--reward-discount", type=float, default=0.99)
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
@@ -48,21 +48,24 @@ def get_linear_schedule(start, end, duration, t):
 
 
 
+
+
 class DQNAgent():
     def __init__(self, args, run_name):
         self.args = args
         self.env = gym.make(args.env_name)
-        self.eval_env = gym.make(args.env_name)
+        self.eval_env = gym.make(args.env_name, render_mode='rgb_array')
         if self.args.record_video:
             video_folder = f"/Users/andrew/dev/deep-rl/runs/{run_name}/videos"
             os.makedirs(video_folder, exist_ok=True)
             self.eval_env = gym.wrappers.RecordVideo(self.eval_env, video_folder=video_folder, episode_trigger=lambda x: x % self.args.eval_episodes == 0)
+
         observation, info = self.env.reset(seed=args.env_seed)
 
         self.state_dim = observation.shape[0]
         self.num_actions = self.env.action_space.n
 
-        self.replay_memory = ReplayMemory(self.state_dim, args.memory_capacity, args.minibatch_size)
+        self.replay_buffer = ReplayBuffer(self.state_dim, args.replay_capacity, args.minibatch_size)
         self.q_network = QNetwork(self.state_dim, self.num_actions)
         self.target_network = QNetwork(self.state_dim, self.num_actions)
         self.update_target_network()
@@ -82,7 +85,7 @@ class DQNAgent():
         while not done:
             self.global_timestep += 1
             self.epsilon = get_linear_schedule(self.args.epsilon_start, self.args.epsilon_end, int(self.args.epsilon_anneal_frac * self.args.total_timesteps), self.global_timestep)
-            if random.random() < self.epsilon:
+            if self.global_timestep < args.start_learning_timestep or random.random() < self.epsilon:
                 action = self.env.action_space.sample()
             else:
                 q_values = self.q_network(torch.Tensor(observation))
@@ -91,11 +94,11 @@ class DQNAgent():
             next_observation, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             transition = (observation, action, reward, next_observation, int(terminated or truncated))
-            self.replay_memory.store_transition(transition)
+            self.replay_buffer.store_transition(transition)
 
             if self.global_timestep >= args.start_learning_timestep:
                 if self.global_timestep % self.args.train_timesteps == 0:
-                    minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = self.replay_memory.sample_minibatch()
+                    minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = self.replay_buffer.sample_minibatch()
                     minibatch_is_terminal = minibatch_is_terminal.astype(bool)
                     
                     with torch.no_grad():
@@ -158,6 +161,7 @@ class DQNAgent():
 
     def cleanup(self):
         self.env.close()
+        self.eval_env.close()
                 
 
 
@@ -177,7 +181,7 @@ class QNetwork(nn.Module):
 
 
 
-class ReplayMemory():
+class ReplayBuffer():
     def __init__(self, state_dim, capacity, minibatch_size):
         self.transition_dim = (2 * state_dim) + 3
         self.state_dim = state_dim
@@ -185,7 +189,7 @@ class ReplayMemory():
         self.current_size = 0
         self.minibatch_size = minibatch_size
         self.next_store_idx = 0
-        self.memory = np.zeros((self.capacity, self.transition_dim))
+        self.buffer = np.zeros((self.capacity, self.transition_dim))
     
     def store_transition(self, transition):
         (observation, action, reward, next_observation, done) = transition
@@ -195,13 +199,13 @@ class ReplayMemory():
         transition_array[self.state_dim + 1] = reward
         transition_array[self.state_dim + 2 : (2 * self.state_dim) + 2] = next_observation
         transition_array[(2 * self.state_dim) + 2] = done
-        self.memory[self.next_store_idx] = transition_array
+        self.buffer[self.next_store_idx] = transition_array
         self.next_store_idx = (self.next_store_idx + 1) % self.capacity
         self.current_size = min(self.current_size + 1, self.capacity)
 
     def sample_minibatch(self):
         indices = np.random.choice(self.current_size, self.minibatch_size)
-        minibatch = self.memory[indices]
+        minibatch = self.buffer[indices]
         minibatch_states = minibatch[:, :self.state_dim]
         minibatch_actions = minibatch[:, self.state_dim]
         minibatch_rewards = minibatch[:, self.state_dim + 1]
@@ -225,6 +229,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=False,
             save_code=True,
+            dir="/Users/andrew/dev/deep-rl"
         )
 
     writer = SummaryWriter(log_dir=f"/Users/andrew/dev/deep-rl/runs/{run_name}")
@@ -234,10 +239,8 @@ if __name__ == "__main__":
     )
 
     agent = DQNAgent(args, run_name)
-    mean_returns = []
-    std_returns = []
-    mean_td_errors = []
-    ep = 0
+    
+    ep = 1
     t0 = time.time()
     while agent.global_timestep < args.total_timesteps:
         agent.train_episode()
@@ -250,23 +253,26 @@ if __name__ == "__main__":
             if agent.global_timestep >= args.start_learning_timestep:
                 mean_return, std_return, mean_td_error = agent.eval()
 
-                mean_returns.append(mean_return)
-                std_returns.append(std_return)
-                mean_td_errors.append(mean_td_error)
-
                 writer.add_scalar("eval/mean_return", mean_return, global_step=agent.global_timestep)
                 writer.add_scalar("eval/std_return", std_return, global_step=agent.global_timestep)
                 writer.add_scalar("eval/mean_td_error", mean_td_error, global_step=agent.global_timestep)
 
-                print(f"Eval complete.\nMean return: {mean_return}\nStd return: {std_return}\nMean TD error: {mean_td_error}\nMemory size: {agent.replay_memory.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
+                print(f"Mean return: {mean_return}\nStd return: {std_return}\nMean TD error: {mean_td_error}\nReplay buffer size: {agent.replay_buffer.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
             else:
-                print(f"Skipping eval since haven't started training yet.\nMemory size: {agent.replay_memory.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
+                print(f"Skipping eval since haven't started training yet.\nReplay buffer size: {agent.replay_buffer.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
 
         if args.save_model_freq > 0 and ep % args.save_model_freq == 0:
             model_path = f"/Users/andrew/dev/deep-rl/runs/{run_name}/{exp_name}__ep{str(ep)}.model"
             agent.save_model(model_path)
 
         ep += 1
+
+    print(f"\n{'=' * 16} FINAL EVAL {'=' * 16}")
+    writer.add_scalar("eval/mean_return", mean_return, global_step=agent.global_timestep)
+    writer.add_scalar("eval/std_return", std_return,global_step=agent.global_timestep)
+    writer.add_scalar("eval/mean_td_error", mean_td_error,global_step=agent.global_timestep)
+
+    print(f"Mean return: {mean_return}\nStd return: {std_return}\nMean TD error: {mean_td_error}\nReplay buffer size: {agent.replay_buffer.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
 
 
     agent.cleanup()
