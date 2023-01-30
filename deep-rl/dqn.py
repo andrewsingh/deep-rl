@@ -45,9 +45,7 @@ def parse_args():
 def get_linear_schedule(start, end, duration, t):
     slope = (end - start) / duration
     return max(start + (slope * t), end)
-
-
-
+    
 
 
 class DQNAgent():
@@ -76,7 +74,7 @@ class DQNAgent():
 
 
     def update_target_network(self):
-        self.target_network.model.load_state_dict(self.q_network.model.state_dict())
+        self.target_network.load_state_dict(self.q_network.state_dict())
 
 
     def train_episode(self):

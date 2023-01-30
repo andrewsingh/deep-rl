@@ -18,23 +18,25 @@ def parse_args():
 
     parser.add_argument("--total-timesteps", type=int, default=500000)
     parser.add_argument("--eval-episodes", type=int, default=10)
-    parser.add_argument("--eval-freq", type=int, default=100)
-    parser.add_argument("--env-name", type=str, default="BipedalWalker-v3")
+    parser.add_argument("--eval-freq", type=int, default=10)
+    parser.add_argument("--env-name", type=str, default="HalfCheetah-v4")
     parser.add_argument("--env-seed", type=int, default=42)
     
     parser.add_argument("--start-learning-timestep", type=int, default=10000)
-    parser.add_argument("--train-interval", type=int, default=5)
-    parser.add_argument("--update-target-interval", type=int, default=5)
+    parser.add_argument("--actor-interval", type=int, default=2)
+    parser.add_argument("--critic-interval", type=int, default=1)
+    parser.add_argument("--update-target-interval", type=int, default=2)
 
     parser.add_argument("--actor-lr", type=float, default=2.5e-4)
     parser.add_argument("--critic-lr", type=float, default=2.5e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--tau", type=float, default=0.001)
+    parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--action-noise-scale", type=float, default=0.2)
-    parser.add_argument("--actor-hidden-dim", type=int, default=20)
-    parser.add_argument("--critic-hidden-dim", type=int, default=20)
-    parser.add_argument("--replay-capacity", type=int, default=100000)
-    parser.add_argument("--minibatch-size", type=int, default=64)
+    parser.add_argument("--action-noise-clip", type=float, default=0.5)
+    parser.add_argument("--actor-hidden-dim", type=int, default=64)
+    parser.add_argument("--critic-hidden-dim", type=int, default=64)
+    parser.add_argument("--replay-capacity", type=int, default=1000000)
+    parser.add_argument("--minibatch-size", type=int, default=128)
 
     parser.add_argument("--use-tensorboard", action='store_true')
     parser.add_argument("--use-wandb", action='store_true')
@@ -90,17 +92,17 @@ class DDPGAgent():
                 action = self.env.action_space.sample()
             else:
                 action = self.actor(torch.Tensor(observation)).detach().numpy()
-                action += np.random.normal(loc=0.0, scale=self.args.action_noise_scale, size=self.action_dim)
-                action = np.clip(action, -1, 1)
+                action_noise = np.clip(np.random.normal(loc=0.0, scale=self.args.action_noise_scale, size=self.action_dim), -self.args.action_noise_clip, self.args.action_noise_clip)
+                action = np.clip(action + action_noise, -1, 1)
             
             next_observation, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             transition = (observation, action, reward, next_observation, int(terminated or truncated))
             self.replay_buffer.store_transition(transition)
 
-            if self.global_timestep >= args.start_learning_timestep:
-                if self.global_timestep % self.args.train_interval == 0:
-                    minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = self.replay_buffer.sample_minibatch()
+            if self.global_timestep >= self.args.start_learning_timestep:
+                if self.global_timestep % self.args.critic_interval == 0:
+                    minibatch_states, minibatch_actions, minibatch_rewards,minibatch_next_states, minibatch_is_terminal = self.replay_buffer.sample_minibatch()
                     minibatch_is_terminal = minibatch_is_terminal.astype(bool)
 
                     with torch.no_grad():
@@ -118,6 +120,7 @@ class DDPGAgent():
                     critic_loss.backward()
                     self.critic_optimizer.step()
 
+                if self.global_timestep % self.args.actor_interval == 0:
                     minibatch_states_t = torch.Tensor(minibatch_states)
                     actor_action_preds = self.actor(minibatch_states_t)
                     critic_value_preds = self.critic(torch.cat((minibatch_states_t, actor_action_preds), dim=1))
@@ -147,7 +150,9 @@ class DDPGAgent():
             observation, info = self.eval_env.reset()
             
             while not done:
-                action = self.actor(torch.Tensor(observation)).detach().numpy()
+                with torch.no_grad():
+                    action = self.actor(torch.Tensor(observation)).numpy()
+                    
                 observation, reward, terminated, truncated, info = self.eval_env.step(action)
                 done = terminated or truncated
                 ep_return += reward
@@ -282,8 +287,8 @@ if __name__ == "__main__":
             if agent.global_timestep >= args.start_learning_timestep:
                 mean_return, std_return = agent.eval()
                 if logging:
-                    writer.add_scalar("eval/mean_return", mean_return, global_step=ep)
-                    writer.add_scalar("eval/std_return", std_return, global_step=ep)
+                    writer.add_scalar("eval/mean_return", mean_return, global_step=agent.global_timestep)
+                    writer.add_scalar("eval/std_return", std_return, global_step=agent.global_timestep)
 
                 print(f"Mean return: {mean_return}\nStd return: {std_return}\nReplay buffer size: {agent.replay_buffer.current_size}\nGlobal timestep: {agent.global_timestep}")
             else:
@@ -299,8 +304,8 @@ if __name__ == "__main__":
     print(f"\n{'=' * 16} FINAL EVAL {'=' * 16}")
     mean_return, std_return = agent.eval()
     if logging:
-        writer.add_scalar("eval/mean_return", mean_return,global_step=ep)
-        writer.add_scalar("eval/std_return", std_return, global_step=ep)
+        writer.add_scalar("eval/mean_return", mean_return,global_step=agent.global_timestep)
+        writer.add_scalar("eval/std_return", std_return, global_step=agent.global_timestep)
         writer.close()
 
     print(f"Mean return: {mean_return}\nStd return: {std_return}\nGlobal timestep: {agent.global_timestep}")
