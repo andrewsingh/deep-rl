@@ -16,13 +16,13 @@ from torch.utils.tensorboard import SummaryWriter
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--total-timesteps", type=int, default=500000)
+    parser.add_argument("--total-timesteps", type=int, default=1000000)
     parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10)
     parser.add_argument("--env-name", type=str, default="HalfCheetah-v4")
     parser.add_argument("--env-seed", type=int, default=42)
     
-    parser.add_argument("--start-learning-timestep", type=int, default=10000)
+    parser.add_argument("--start-learning-timestep", type=int, default=25000)
     parser.add_argument("--actor-interval", type=int, default=2)
     parser.add_argument("--critic-interval", type=int, default=1)
     parser.add_argument("--update-target-interval", type=int, default=2)
@@ -31,10 +31,10 @@ def parse_args():
     parser.add_argument("--critic-lr", type=float, default=2.5e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
-    parser.add_argument("--action-noise-scale", type=float, default=0.2)
+    parser.add_argument("--action-noise-scale", type=float, default=0.1)
     parser.add_argument("--action-noise-clip", type=float, default=0.5)
-    parser.add_argument("--actor-hidden-dim", type=int, default=64)
-    parser.add_argument("--critic-hidden-dim", type=int, default=64)
+    parser.add_argument("--actor-hidden-dim", type=int, default=128)
+    parser.add_argument("--critic-hidden-dim", type=int, default=128)
     parser.add_argument("--replay-capacity", type=int, default=1000000)
     parser.add_argument("--minibatch-size", type=int, default=128)
 
@@ -275,6 +275,7 @@ if __name__ == "__main__":
     agent = DDPGAgent(args, run_name)
     ep = 1
     t0 = time.time()
+    t_start = t0
     while agent.global_timestep < args.total_timesteps:
         agent.train_episode()
 
@@ -309,5 +310,8 @@ if __name__ == "__main__":
         writer.close()
 
     print(f"Mean return: {mean_return}\nStd return: {std_return}\nGlobal timestep: {agent.global_timestep}")
+
+    t_end = time.time()
+    print(f"Total time elapsed: {t_end - t_start}")
 
     agent.cleanup()
