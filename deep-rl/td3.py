@@ -34,8 +34,10 @@ def parse_args():
     # Other hyperparams
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
-    parser.add_argument("--action-noise-scale", type=float, default=0.1)
-    parser.add_argument("--action-noise-clip", type=float, default=0.5)
+    parser.add_argument("--exploration-noise-scale", type=float, default=0.1)
+    parser.add_argument("--exploration-noise-clip", type=float, default=0.5)
+    parser.add_argument("--target-noise-scale", type=float, default=0.1)
+    parser.add_argument("--target-noise-clip", type=float, default=0.5)
     parser.add_argument("--replay-capacity", type=int, default=1000000)
     parser.add_argument("--start-learning-timestep", type=int, default=25000)
     
@@ -52,7 +54,7 @@ def parse_args():
 
 
 
-def ddpg(args, env, eval_env, writer=None):
+def td3(args, env, eval_env, writer=None):
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     print(f"Device: {device}")
 
@@ -62,18 +64,22 @@ def ddpg(args, env, eval_env, writer=None):
 
     # Initialization of actor-critic networks and replay buffer
     actor = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim).to(device)
-    critic = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
+    critic1 = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
+    critic2 = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
     
     actor_target = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim).to(device)
-    critic_target = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
+    critic1_target = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
+    critic2_target = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
 
     actor_target.load_state_dict(actor.state_dict())
-    critic_target.load_state_dict(critic.state_dict())
+    critic1_target.load_state_dict(critic1.state_dict())
+    critic2_target.load_state_dict(critic2.state_dict())
 
     replay_buffer = ReplayBuffer(state_dim, action_dim, args.replay_capacity, args.minibatch_size)
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=args.actor_lr)
-    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=args.critic_lr)
+    critic1_optimizer = torch.optim.Adam(critic1.parameters(), lr=args.critic_lr)
+    critic2_optimizer = torch.optim.Adam(critic2.parameters(), lr=args.critic_lr)
 
     global_timestep = 0
     ep = 0
@@ -90,8 +96,8 @@ def ddpg(args, env, eval_env, writer=None):
             else:
                 with torch.no_grad():
                     action = actor(torch.Tensor(observation).to(device)).cpu().numpy()
-                    action_noise = np.clip(np.random.normal(loc=0.0, scale=args.action_noise_scale, size=action_dim), -args.action_noise_clip, args.action_noise_clip)
-                    action = np.clip(action + action_noise, -1, 1)
+                    action_noise = np.random.normal(loc=0.0, scale=args.exploration_noise_scale, size=action_dim).clip(-args.exploration_noise_scale, args.exploration_noise_scale)
+                    action = (action + action_noise).clip(-1, 1)
             
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
@@ -104,34 +110,40 @@ def ddpg(args, env, eval_env, writer=None):
 
                 with torch.no_grad():
                     minibatch_next_states_t = torch.Tensor(minibatch_next_states).to(device)
-                    minibach_next_actions_t = actor_target(minibatch_next_states_t)
+                    minibatch_next_actions = actor_target(minibatch_next_states_t)
+                    minibatch_next_actions_noise = torch.normal(mean=0.0, std=args.target_noise_scale, size=minibatch_next_actions.shape).clamp(-args.target_noise_clip, args.target_noise_clip).to(device)
+                    minibatch_next_actions = (minibatch_next_actions + minibatch_next_actions_noise).clamp(-1, 1)
 
-                    minibatch_target_q_values = critic_target(torch.cat((minibatch_next_states_t, minibach_next_actions_t), dim=1)).squeeze().cpu().numpy()
+                    minibatch_target_q_values1 = critic1_target(torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)).squeeze().cpu().numpy()
+                    minibatch_target_q_values2 = critic2_target(torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)).squeeze().cpu().numpy()
+
+                    minibatch_target_q_values = np.minimum(minibatch_target_q_values1, minibatch_target_q_values2)
                     minibatch_q_targets = minibatch_rewards + (~minibatch_is_terminal * args.gamma * minibatch_target_q_values)
-            
-                minibatch_q_preds = critic(torch.Tensor(np.concatenate((minibatch_states, minibatch_actions),axis=1)).to(device)).squeeze()
 
                 minibatch_q_targets_t = torch.Tensor(minibatch_q_targets).to(device)
-                
-                critic_loss = F.mse_loss(minibatch_q_preds, minibatch_q_targets_t, reduction='mean')
+            
+                for critic, critic_optimizer in [(critic1, critic1_optimizer), (critic2, critic2_optimizer)]:
+                    minibatch_q_preds = critic(torch.Tensor(np.concatenate((minibatch_states, minibatch_actions), axis=1)).to(device)).squeeze()
 
-                critic_optimizer.zero_grad()
-                critic_loss.backward()
-                critic_optimizer.step()
+                    critic_loss = F.mse_loss(minibatch_q_preds, minibatch_q_targets_t, reduction='mean')
+                    critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    critic_optimizer.step()
 
                 if global_timestep % args.actor_freq == 0:
                     minibatch_states_t = torch.Tensor(minibatch_states).to(device)
                     actor_action_preds = actor(minibatch_states_t)
-                    critic_value_preds = critic(torch.cat((minibatch_states_t, actor_action_preds), dim=1).to(device))
+                    critic1_value_preds = critic1(torch.cat((minibatch_states_t, actor_action_preds), dim=1).to(device))
 
-                    actor_loss = -critic_value_preds.mean()
+                    actor_loss = -critic1_value_preds.mean()
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
                     actor_optimizer.step()
 
                 if global_timestep % args.update_target_freq == 0:
                     soft_update_target_network(actor_target, actor, args.tau)
-                    soft_update_target_network(critic_target, critic, args.tau)
+                    soft_update_target_network(critic1_target, critic, args.tau)
+                    soft_update_target_network(critic2_target, critic, args.tau)
 
             observation = next_observation
 
@@ -284,10 +296,10 @@ if __name__ == "__main__":
         os.makedirs(video_folder, exist_ok=True)
         eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
 
-    # Run DDPG algorithm
+    # Run TD3 algorithm
     t_start = time.time()
 
-    ddpg(args, env, eval_env, writer=writer)
+    td3(args, env, eval_env, writer=writer)
 
     t_end = time.time()
     print(f"Total time elapsed: {t_end - t_start}")
