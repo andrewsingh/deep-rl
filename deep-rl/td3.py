@@ -147,11 +147,10 @@ def td3(args, env, eval_env, writer=None):
 
             observation = next_observation
 
-
             if global_timestep % args.eval_freq == 0:
                 t1 = time.time()
                 print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
-                print(f"Iteration time: {t1 - t0}\nEpisodes completed: {ep}")
+                print(f"Iteration time: {t1 - t0}\nCurrent episode: {ep}")
                 t0 = t1
 
                 if global_timestep >= args.start_learning_timestep:

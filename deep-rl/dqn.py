@@ -16,151 +16,158 @@ from torch.utils.tensorboard import SummaryWriter
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--total-timesteps", type=int, default=500000)
-    parser.add_argument("--train-timesteps", type=int, default=10)
-    parser.add_argument("--eval-episodes", type=int, default=10)
-    parser.add_argument("--eval-epsilon", type=int, default=0.05)
-    parser.add_argument("--eval-freq", type=int, default=200)
-    parser.add_argument("--update-target-timesteps", type=int, default=500)
-    parser.add_argument("--start-learning-timestep", type=int, default=10000)
+    # Experiment settings
     parser.add_argument("--env-name", type=str, default="CartPole-v1")
     parser.add_argument("--env-seed", type=int, default=42)
+    parser.add_argument("--total-timesteps", type=int, default=500000)
+    parser.add_argument("--eval-freq", type=int, default=10000)
+    parser.add_argument("--eval-num-episodes", type=int, default=10)
+
+    # Q network hyperparams
+    parser.add_argument("--lr", type=float, default=2.5e-4)
+    parser.add_argument("--minibatch-size", type=int, default=128)
+    parser.add_argument("--update-freq", type=int, default=10)
+    parser.add_argument("--update-target-freq", type=int, default=500)
+
+    # Other hyperparams
     parser.add_argument("--epsilon-start", type=float, default=1)
     parser.add_argument("--epsilon-end", type=float, default=0.05)
     parser.add_argument("--epsilon-anneal-frac", type=float, default=0.5)
+    parser.add_argument("--eval-epsilon", type=int, default=0.05)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--tau", type=float, default=1)
     parser.add_argument("--replay-capacity", type=int, default=10000)
-    parser.add_argument("--minibatch-size", type=int, default=128)
-    parser.add_argument("--reward-discount", type=float, default=0.99)
-    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument("--start-learning-timestep", type=int, default=10000)
+    
+    # Logging
+    parser.add_argument("--cpu", action='store_true')
+    parser.add_argument("--use-tensorboard", action='store_true')
     parser.add_argument("--use-wandb", action='store_true')
     parser.add_argument("--wandb-project-name", type=str, default="deep-rl")
     parser.add_argument("--wandb-entity-name", type=str, default="andrew99")
-    parser.add_argument("--save-model-freq", type=int, default=-1)
     parser.add_argument("--record-video", action='store_true')
+
     args = parser.parse_args()
     return args
 
 
 
-def get_linear_schedule(start, end, duration, t):
-    slope = (end - start) / duration
-    return max(start + (slope * t), end)
-    
+def dqn(args, env, eval_env, writer=None):
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    print(f"Device: {device}")
 
+    observation, info = env.reset(seed=args.env_seed)
+    state_dim = observation.shape[0]
+    num_actions = env.action_space.n
 
-class DQNAgent():
-    def __init__(self, args, run_name):
-        self.args = args
-        self.env = gym.make(args.env_name)
-        self.eval_env = gym.make(args.env_name, render_mode='rgb_array')
-        if self.args.record_video:
-            video_folder = f"/Users/andrew/dev/deep-rl/runs/{run_name}/videos"
-            os.makedirs(video_folder, exist_ok=True)
-            self.eval_env = gym.wrappers.RecordVideo(self.eval_env, video_folder=video_folder, episode_trigger=lambda x: x % self.args.eval_episodes == 0)
+    q_network = QNetwork(state_dim, num_actions).to(device)
+    target_network = QNetwork(state_dim, num_actions).to(device)
+    target_network.load_state_dict(q_network.state_dict())
 
-        observation, info = self.env.reset(seed=args.env_seed)
+    replay_buffer = ReplayBuffer(state_dim, args.replay_capacity, args.minibatch_size)
 
-        self.state_dim = observation.shape[0]
-        self.num_actions = self.env.action_space.n
+    optimizer = torch.optim.Adam(q_network.parameters(), lr=args.lr)
+    global_timestep = 0
+    epsilon = args.epsilon_start
 
-        self.replay_buffer = ReplayBuffer(self.state_dim, args.replay_capacity, args.minibatch_size)
-        self.q_network = QNetwork(self.state_dim, self.num_actions)
-        self.target_network = QNetwork(self.state_dim, self.num_actions)
-        self.update_target_network()
-
-        self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=args.learning_rate)
-        self.global_timestep = 0
-        self.epsilon = self.args.epsilon_start
-
-
-    def update_target_network(self):
-        self.target_network.load_state_dict(self.q_network.state_dict())
-
-
-    def train_episode(self):
+    global_timestep = 0
+    ep = 0
+    t0 = time.time()
+    while global_timestep < args.total_timesteps:
+        ep += 1
         done = False
-        observation, info = self.env.reset()
+        observation, info = env.reset()
         while not done:
-            self.global_timestep += 1
-            self.epsilon = get_linear_schedule(self.args.epsilon_start, self.args.epsilon_end, int(self.args.epsilon_anneal_frac * self.args.total_timesteps), self.global_timestep)
-            if self.global_timestep < args.start_learning_timestep or random.random() < self.epsilon:
-                action = self.env.action_space.sample()
+            global_timestep += 1
+
+            epsilon = get_linear_schedule(args.epsilon_start, args.epsilon_end, int(args.epsilon_anneal_frac * args.total_timesteps), global_timestep)
+            if global_timestep < args.start_learning_timestep or random.random() < epsilon:
+                action = env.action_space.sample()
             else:
-                q_values = self.q_network(torch.Tensor(observation))
+                q_values = q_network(torch.Tensor(observation).to(device))
                 action = torch.argmax(q_values).item()
 
-            next_observation, reward, terminated, truncated, info = self.env.step(action)
+            next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             transition = (observation, action, reward, next_observation, int(terminated or truncated))
-            self.replay_buffer.store_transition(transition)
+            replay_buffer.store_transition(transition)
 
-            if self.global_timestep >= args.start_learning_timestep:
-                if self.global_timestep % self.args.train_timesteps == 0:
-                    minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = self.replay_buffer.sample_minibatch()
+            if global_timestep >= args.start_learning_timestep:
+                if global_timestep % args.update_freq == 0:
+                    minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = replay_buffer.sample_minibatch()
                     minibatch_is_terminal = minibatch_is_terminal.astype(bool)
                     
                     with torch.no_grad():
-                        minibatch_all_q_values = self.target_network(torch.Tensor(minibatch_next_states)).numpy()
+                        minibatch_all_q_values = target_network(torch.Tensor(minibatch_next_states).to(device)).cpu().numpy()
                         minibatch_max_q_values = np.amax(minibatch_all_q_values, axis=1)
-                        minibatch_targets = minibatch_rewards + (~minibatch_is_terminal * self.args.reward_discount * minibatch_max_q_values)
+                        minibatch_targets = minibatch_rewards + (~minibatch_is_terminal * args.gamma * minibatch_max_q_values)
                         
-                    minibatch_all_preds = self.q_network(torch.Tensor(minibatch_states))
+                    minibatch_all_preds = q_network(torch.Tensor(minibatch_states).to(device))
                     minibatch_action_preds = minibatch_all_preds[np.arange(len(minibatch_all_preds)), minibatch_actions]
+                    minibatch_targets_t = torch.Tensor(minibatch_targets).to(device)
                     
-                    loss = F.mse_loss(minibatch_action_preds, torch.Tensor(minibatch_targets), reduction='mean')
+                    loss = F.mse_loss(minibatch_action_preds, minibatch_targets_t, reduction='mean')
 
-                    self.optimizer.zero_grad()
+                    optimizer.zero_grad()
                     loss.backward()
-                    self.optimizer.step()
+                    optimizer.step()
 
-                if self.global_timestep % self.args.update_target_timesteps == 0:
-                    self.update_target_network()
+                if global_timestep % args.update_target_freq == 0:
+                    soft_update_target_network(target_network, q_network, args.tau)
 
             observation = next_observation
 
+            if global_timestep % args.eval_freq == 0:
+                t1 = time.time()
+                print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
+                print(f"Iteration time: {t1 - t0}\nCurrent episode: {ep}")
+                t0 = t1
 
-    def eval(self):
-        returns = []
-        mean_td_errors = []
-        for ep in range(self.args.eval_episodes):
-            rewards = []
-            td_errors = []
-            done = False
-            observation, info = self.eval_env.reset()
-            next_q_values = self.q_network(torch.Tensor(observation))
+                if global_timestep >= args.start_learning_timestep:
+                    mean_return, std_return = evaluate(eval_env, q_network, args.eval_num_episodes, device=device)
 
-            while not done:
-                q_values = next_q_values
-                if random.random() < self.args.eval_epsilon:
-                    action = self.eval_env.action_space.sample()
+                    if writer != None:
+                        writer.add_scalar("eval/mean_return", mean_return, global_step=global_timestep)
+                        writer.add_scalar("eval/std_return", std_return, global_step=global_timestep)
+
+                    print(f"Mean return: {mean_return}\nStd return: {std_return}\nReplay buffer size: {replay_buffer.current_size}\nTrain epsilon: {epsilon}")
                 else:
-                    q_values = self.q_network(torch.Tensor(observation))
+                    print(f"Skipping eval - still filling the replay buffer.\nReplay buffer size: {replay_buffer.current_size}\nTrain epsilon: {epsilon}")
+
+
+def evaluate(eval_env, q_network, num_episodes, device="cpu"):
+    ep_returns = []
+    for ep in range(num_episodes):
+        ep_return = 0
+        done = False
+        observation, info = eval_env.reset()
+
+        while not done:
+            if random.random() < args.eval_epsilon:
+                action = eval_env.action_space.sample()
+            else:
+                with torch.no_grad():
+                    q_values = q_network(torch.Tensor(observation).to(device))
                     action = torch.argmax(q_values).item()
 
-                observation, reward, terminated, truncated, info = self.eval_env.step(action)
-                done = terminated or truncated
-                rewards.append(reward)
-                if not done:
-                    next_q_values = self.q_network(torch.Tensor(observation))
-                    target = reward + (self.args.reward_discount * torch.max(next_q_values).item())
-                    td_error = abs(target - torch.max(q_values).item())
-                    td_errors.append(td_error)
-            
-            returns.append(sum(rewards))
-            mean_td_errors.append(np.mean(td_errors))
+            observation, reward, terminated, truncated, info = eval_env.step(action)
+            done = terminated or truncated
+            ep_return += reward
         
-        return np.mean(returns), np.std(returns), np.mean(mean_td_errors)
+        ep_returns.append(ep_return)
+    
+    return np.mean(ep_returns), np.std(ep_returns)
 
 
-    def save_model(self, model_path):
-        torch.save(self.q_network.state_dict(), model_path)
-        print(f"model saved to {model_path}")
+def soft_update_target_network(target_network, local_network, tau):
+    for target_param, local_param in zip(target_network.parameters(), local_network.parameters()):
+        target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
 
-    def cleanup(self):
-        self.env.close()
-        self.eval_env.close()
-                
+def get_linear_schedule(start, end, duration, t):
+    slope = (end - start) / duration
+    return max(start + (slope * t), end)
+
 
 
 class QNetwork(nn.Module):
@@ -215,9 +222,11 @@ class ReplayBuffer():
 
 if __name__ == "__main__":
     args = parse_args()
+    root_dir = os.path.dirname(os.getcwd())
     exp_name = os.path.basename(__file__).rstrip(".py")
     run_name = f"{args.env_name}__{exp_name}__{args.env_seed}__{int(time.time())}"
-
+    
+    # Logging setup
     if args.use_wandb:
         wandb.init(
             project=args.wandb_project_name,
@@ -227,53 +236,37 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=False,
             save_code=True,
-            dir="/Users/andrew/dev/deep-rl"
+            dir=root_dir
         )
 
-    writer = SummaryWriter(log_dir=f"/Users/andrew/dev/deep-rl/runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
-
-    agent = DQNAgent(args, run_name)
+    writer = None
+    if args.use_tensorboard or args.use_wandb:
+        writer = SummaryWriter(log_dir=f"{root_dir}/runs/{run_name}")
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
     
-    ep = 1
-    t0 = time.time()
-    while agent.global_timestep < args.total_timesteps:
-        agent.train_episode()
+    # Environment setup
+    env = gym.make(args.env_name)
+    eval_env = gym.make(args.env_name, render_mode='rgb_array')
 
-        if ep % args.eval_freq == 0:
-            t1 = time.time()
-            print(f"\n{'=' * 16} EPISODE {ep} {'=' * 16}")
-            print(f"Iteration time: {t1 - t0}")
-            t0 = t1
-            if agent.global_timestep >= args.start_learning_timestep:
-                mean_return, std_return, mean_td_error = agent.eval()
+    if args.record_video:
+        video_folder = f"{root_dir}/runs/{run_name}/videos"
+        os.makedirs(video_folder, exist_ok=True)
+        eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
 
-                writer.add_scalar("eval/mean_return", mean_return, global_step=agent.global_timestep)
-                writer.add_scalar("eval/std_return", std_return, global_step=agent.global_timestep)
-                writer.add_scalar("eval/mean_td_error", mean_td_error, global_step=agent.global_timestep)
+    # Run DQN algorithm
+    t_start = time.time()
 
-                print(f"Mean return: {mean_return}\nStd return: {std_return}\nMean TD error: {mean_td_error}\nReplay buffer size: {agent.replay_buffer.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
-            else:
-                print(f"Skipping eval since haven't started training yet.\nReplay buffer size: {agent.replay_buffer.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
+    dqn(args, env, eval_env, writer=writer)
 
-        if args.save_model_freq > 0 and ep % args.save_model_freq == 0:
-            model_path = f"/Users/andrew/dev/deep-rl/runs/{run_name}/{exp_name}__ep{str(ep)}.model"
-            agent.save_model(model_path)
+    t_end = time.time()
+    print(f"Total time elapsed: {t_end - t_start}")
 
-        ep += 1
-
-    print(f"\n{'=' * 16} FINAL EVAL {'=' * 16}")
-    writer.add_scalar("eval/mean_return", mean_return, global_step=agent.global_timestep)
-    writer.add_scalar("eval/std_return", std_return,global_step=agent.global_timestep)
-    writer.add_scalar("eval/mean_td_error", mean_td_error,global_step=agent.global_timestep)
-
-    print(f"Mean return: {mean_return}\nStd return: {std_return}\nMean TD error: {mean_td_error}\nReplay buffer size: {agent.replay_buffer.current_size}\nEpsilon: {agent.epsilon}\nGlobal timestep: {agent.global_timestep}")
-
-
-    agent.cleanup()
+    # Cleanup
+    env.close()
+    eval_env.close()
     writer.close()
 
         

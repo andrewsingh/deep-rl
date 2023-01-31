@@ -34,8 +34,8 @@ def parse_args():
     # Other hyperparams
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
-    parser.add_argument("--action-noise-scale", type=float, default=0.1)
-    parser.add_argument("--action-noise-clip", type=float, default=0.5)
+    parser.add_argument("--exploration-noise-scale", type=float, default=0.1)
+    parser.add_argument("--exploration-noise-clip", type=float, default=0.5)
     parser.add_argument("--replay-capacity", type=int, default=1000000)
     parser.add_argument("--start-learning-timestep", type=int, default=25000)
     
@@ -90,8 +90,8 @@ def ddpg(args, env, eval_env, writer=None):
             else:
                 with torch.no_grad():
                     action = actor(torch.Tensor(observation).to(device)).cpu().numpy()
-                    action_noise = np.clip(np.random.normal(loc=0.0, scale=args.action_noise_scale, size=action_dim), -args.action_noise_clip, args.action_noise_clip)
-                    action = np.clip(action + action_noise, -1, 1)
+                    action_noise = np.random.normal(loc=0.0, scale=args.exploration_noise_scale, size=action_dim).clip(-args.exploration_noise_scale, args.exploration_noise_scale)
+                    action = (action + action_noise).clip(-1, 1)
             
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
@@ -135,11 +135,10 @@ def ddpg(args, env, eval_env, writer=None):
 
             observation = next_observation
 
-
             if global_timestep % args.eval_freq == 0:
                 t1 = time.time()
                 print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
-                print(f"Iteration time: {t1 - t0}\nEpisodes completed: {ep}")
+                print(f"Iteration time: {t1 - t0}\nCurrent episode: {ep}")
                 t0 = t1
 
                 if global_timestep >= args.start_learning_timestep:
