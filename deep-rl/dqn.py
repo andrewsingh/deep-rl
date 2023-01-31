@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument("--eval-freq", type=int, default=10000)
     parser.add_argument("--eval-num-episodes", type=int, default=10)
 
-    # Q network hyperparams
+    # Network hyperparams
     parser.add_argument("--lr", type=float, default=2.5e-4)
     parser.add_argument("--minibatch-size", type=int, default=128)
     parser.add_argument("--update-freq", type=int, default=10)

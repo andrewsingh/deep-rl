@@ -16,139 +16,262 @@ from torch.utils.tensorboard import SummaryWriter
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--total-timesteps", type=int, default=500000)
-    parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument("--eval-freq", type=int, default=200)
+    # Experiment settings
     parser.add_argument("--env-name", type=str, default="CartPole-v1")
     parser.add_argument("--env-seed", type=int, default=42)
-    parser.add_argument("--reward-discount", type=float, default=0.99)
-    parser.add_argument("--policy-lr", type=float, default=5e-4)
-    parser.add_argument("--state-value-lr", type=float, default=5e-4)
-    parser.add_argument("--policy-hidden-dim", type=float, default=20)
-    parser.add_argument("--state-value-hidden-dim", type=float, default=20)
+    parser.add_argument("--total-timesteps", type=int, default=500000)
+    parser.add_argument("--eval-freq", type=int, default=10000)
+    parser.add_argument("--eval-num-episodes", type=int, default=10)
+    parser.add_argument("--use-baseline", action='store_true')
+
+    # Policy and baseline hyperparams
+    parser.add_argument("--policy-hidden-dim", type=int, default=128)
+    parser.add_argument("--baseline-hidden-dim", type=int, default=128)
+    parser.add_argument("--policy-lr", type=float, default=2.5e-4)
+    parser.add_argument("--baseline-lr", type=float, default=2.5e-4)
+    parser.add_argument("--minibatch-size", type=int, default=128)
+
+    # Other hyperparams
+    parser.add_argument("--gamma", type=float, default=0.99)
+    
+    # Logging
+    parser.add_argument("--cpu", action='store_true')
     parser.add_argument("--use-tensorboard", action='store_true')
     parser.add_argument("--use-wandb", action='store_true')
     parser.add_argument("--wandb-project-name", type=str, default="deep-rl")
     parser.add_argument("--wandb-entity-name", type=str, default="andrew99")
-    parser.add_argument("--save-model-freq", type=int, default=-1)
     parser.add_argument("--record-video", action='store_true')
-    parser.add_argument("--use-baseline", action='store_true')
+
     args = parser.parse_args()
     return args
 
 
 
-class ReinforceAgent():
-    def __init__(self, args, run_name):
-        self.args = args
+def reinforce(args, env, eval_env, writer=None):
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    print(f"Device: {device}")
 
-        self.gamma = self.args.reward_discount
+    observation, info = env.reset(seed=args.env_seed)
+    state_dim = observation.shape[0]
+    num_actions = env.action_space.n
 
-        self.env = gym.make(args.env_name)
-        self.eval_env = gym.make(args.env_name, render_mode='rgb_array')
-        if self.args.record_video:
-            video_folder = f"/Users/andrew/dev/deep-rl/runs/{run_name}/videos"
-            os.makedirs(video_folder, exist_ok=True)
-            self.eval_env = gym.wrappers.RecordVideo(self.eval_env, video_folder=video_folder, episode_trigger=lambda x: x % self.args.eval_episodes == 0)
+    policy_network = ReinforceNetwork(state_dim, num_actions, args.policy_hidden_dim).to(device)
+    policy_optimizer = torch.optim.Adam(policy_network.parameters(), lr=args.policy_lr)
 
-        observation, info = self.env.reset(seed=args.env_seed)
+    if args.use_baseline:
+        baseline_network = ReinforceNetwork(state_dim, 1, args.baseline_hidden_dim).to(device)
+        baseline_optimizer = torch.optim.Adam(baseline_network.parameters(), lr=args.baseline_lr)
 
-        self.state_dim = observation.shape[0]
-        self.action_dim = self.env.action_space.n
-        
-        self.policy_network = ReinforceNetwork(self.state_dim, self.action_dim, self.args.policy_hidden_dim)
-        self.policy_optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=args.policy_lr)
+    global_timestep = 0
+    ep = 0
+    next_eval_timestep = args.eval_freq
+    t0 = time.time()
+    while global_timestep < args.total_timesteps:
+        ep += 1
+        done = False
+        observation, info = env.reset()
 
-        if self.args.use_baseline:
-            self.state_value_network = ReinforceNetwork(self.state_dim, 1, self.args.state_value_hidden_dim)
-            self.state_value_optimizer = torch.optim.Adam(self.state_value_network.parameters(), lr=args.state_value_lr)
-
-        self.global_timestep = 0
-
-    
-    def generate_episode(self):
         states = []
         selected_action_log_probs = []
         rewards = []
-        done = False
-        observation, info = self.env.reset()
         while not done:
-            self.global_timestep += 1
+            global_timestep += 1
             states.append(observation)
-            action_logits = self.policy_network(torch.Tensor(observation))
+            action_logits = policy_network(torch.Tensor(observation).to(device))
             action_log_probs = F.log_softmax(action_logits, dim=0)
-            action_probs = F.softmax(action_logits, dim=0).detach().numpy()
-            action = np.random.choice(self.action_dim, p=action_probs)
+            action_probs = F.softmax(action_logits, dim=0).detach().cpu().numpy()
+            action = np.random.choice(num_actions, p=action_probs)
             selected_action_log_probs.append(action_log_probs[action])
 
-            observation, reward, terminated, truncated, info = self.env.step(action)
+            observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             rewards.append(reward)
 
-        return np.array(states), selected_action_log_probs, rewards
+        ep_len = len(rewards)
+
+        discounted_returns = np.zeros(ep_len)
+        discounted_returns[ep_len-1] = rewards[ep_len-1]
         
+        for t in range(ep_len-2, -1, -1):
+            discounted_returns[t] = rewards[t] + (args.gamma * discounted_returns[t+1])
 
-    def train_episode(self):
-        states, selected_action_log_probs, rewards = self.generate_episode()
-
-        T = len(rewards)
-
-        discounted_returns = np.zeros(T)
-        discounted_returns[T-1] = rewards[T-1]
-        
-        for t in range(T-2, -1, -1):
-            discounted_returns[t] = rewards[t] + (self.gamma * discounted_returns[t+1])
-
-        if self.args.use_baseline:
-            state_values = self.state_value_network(torch.Tensor(states)).squeeze()
-            deltas = torch.Tensor(discounted_returns) - state_values.detach()
+        if args.use_baseline:
+            state_values = baseline_network(torch.Tensor(np.array(states)).to(device)).squeeze()
+            deltas = torch.Tensor(discounted_returns).to(device) - state_values.detach()
         else:
-            deltas = torch.Tensor(discounted_returns)
+            deltas = torch.Tensor(discounted_returns).to(device)
 
         policy_losses = []
         policy_loss_discount = 1
 
-        for t in range(T):
+        for t in range(ep_len):
             policy_loss = policy_loss_discount * deltas[t] * -selected_action_log_probs[t]
             policy_losses.append(policy_loss)
-            policy_loss_discount *= self.gamma
+            policy_loss_discount *= args.gamma
 
         episode_policy_loss = torch.stack(policy_losses).sum()
         
-        self.policy_optimizer.zero_grad()
+        policy_optimizer.zero_grad()
         episode_policy_loss.backward()
-        self.policy_optimizer.step()
+        policy_optimizer.step()
 
-        if self.args.use_baseline:
-            state_value_loss = torch.dot(deltas, -state_values)
-            self.state_value_optimizer.zero_grad()
-            state_value_loss.backward()
-            self.state_value_optimizer.step()
+        if args.use_baseline:
+            baseline_loss = torch.dot(deltas, -state_values)
+            baseline_optimizer.zero_grad()
+            baseline_loss.backward()
+            baseline_optimizer.step()
+
+        if global_timestep >= next_eval_timestep:
+            t1 = time.time()
+            print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
+            print(f"Iteration time: {t1 - t0}\nCurrent episode: {ep}")
+            t0 = t1
+
+            mean_return, std_return = evaluate(eval_env, policy_network, args.eval_num_episodes, device=device)
+
+            if writer != None:
+                writer.add_scalar("eval/mean_return", mean_return, global_step=global_timestep)
+                writer.add_scalar("eval/std_return", std_return, global_step=global_timestep)
+
+            print(f"Mean return: {mean_return}\nStd return: {std_return}")
+
+            next_eval_timestep += args.eval_freq
+            
+
+def evaluate(eval_env, policy_network, num_episodes, device="cpu"):
+    ep_returns = []
+    for ep in range(num_episodes):
+        ep_return = 0
+        done = False
+        observation, info = eval_env.reset()
+        
+        while not done:
+            with torch.no_grad():
+                action_logits = policy_network(torch.Tensor(observation).to(device))
+                action_probs = F.softmax(action_logits, dim=0).cpu().numpy()
+                action = np.random.choice(action_logits.shape[0], p=action_probs)
+
+            observation, reward, terminated, truncated, info = eval_env.step(action)
+            done = terminated or truncated
+            ep_return += reward
+        
+        ep_returns.append(ep_return)
+
+    return np.mean(ep_returns), np.std(ep_returns)
+
+
+
+# class ReinforceAgent():
+#     def __init__(self, args, run_name):
+#         self.args = args
+
+#         self.gamma = self.args.reward_discount
+
+#         self.env = gym.make(args.env_name)
+#         self.eval_env = gym.make(args.env_name, render_mode='rgb_array')
+#         if self.args.record_video:
+#             video_folder = f"/Users/andrew/dev/deep-rl/runs/{run_name}/videos"
+#             os.makedirs(video_folder, exist_ok=True)
+#             self.eval_env = gym.wrappers.RecordVideo(self.eval_env, video_folder=video_folder, episode_trigger=lambda x: x % self.args.eval_episodes == 0)
+
+#         observation, info = self.env.reset(seed=args.env_seed)
+
+#         self.state_dim = observation.shape[0]
+#         self.action_dim = self.env.action_space.n
+        
+#         self.policy_network = ReinforceNetwork(self.state_dim, self.action_dim, self.args.policy_hidden_dim)
+#         self.policy_optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=args.policy_lr)
+
+#         if self.args.use_baseline:
+#             self.baseline_network = ReinforceNetwork(self.state_dim, 1, self.args.baseline_hidden_dim)
+#             self.baseline_optimizer = torch.optim.Adam(self.baseline_network.parameters(), lr=args.baseline_lr)
+
+#         self.global_timestep = 0
 
     
-    def eval(self):
-        ep_returns = []
-        for ep in range(self.args.eval_episodes):
-            ep_return = 0
-            done = False
-            observation, info = self.eval_env.reset()
+#     def generate_episode(self):
+#         states = []
+#         selected_action_log_probs = []
+#         rewards = []
+#         done = False
+#         observation, info = self.env.reset()
+#         while not done:
+#             self.global_timestep += 1
+#             states.append(observation)
+#             action_logits = self.policy_network(torch.Tensor(observation))
+#             action_log_probs = F.log_softmax(action_logits, dim=0)
+#             action_probs = F.softmax(action_logits, dim=0).detach().numpy()
+#             action = np.random.choice(self.action_dim, p=action_probs)
+#             selected_action_log_probs.append(action_log_probs[action])
+
+#             observation, reward, terminated, truncated, info = self.env.step(action)
+#             done = terminated or truncated
+#             rewards.append(reward)
+
+#         return np.array(states), selected_action_log_probs, rewards
+        
+
+#     def train_episode(self):
+#         states, selected_action_log_probs, rewards = self.generate_episode()
+
+#         T = len(rewards)
+
+#         discounted_returns = np.zeros(T)
+#         discounted_returns[T-1] = rewards[T-1]
+        
+#         for t in range(T-2, -1, -1):
+#             discounted_returns[t] = rewards[t] + (self.gamma * discounted_returns[t+1])
+
+#         if self.args.use_baseline:
+#             state_values = self.baseline_network(torch.Tensor(states)).squeeze()
+#             deltas = torch.Tensor(discounted_returns) - state_values.detach()
+#         else:
+#             deltas = torch.Tensor(discounted_returns)
+
+#         policy_losses = []
+#         policy_loss_discount = 1
+
+#         for t in range(T):
+#             policy_loss = policy_loss_discount * deltas[t] * -selected_action_log_probs[t]
+#             policy_losses.append(policy_loss)
+#             policy_loss_discount *= self.gamma
+
+#         episode_policy_loss = torch.stack(policy_losses).sum()
+        
+#         self.policy_optimizer.zero_grad()
+#         episode_policy_loss.backward()
+#         self.policy_optimizer.step()
+
+#         if self.args.use_baseline:
+#             baseline_loss = torch.dot(deltas, -state_values)
+#             self.baseline_optimizer.zero_grad()
+#             baseline_loss.backward()
+#             self.baseline_optimizer.step()
+
+    
+#     def eval(self):
+#         ep_returns = []
+#         for ep in range(self.args.eval_episodes):
+#             ep_return = 0
+#             done = False
+#             observation, info = self.eval_env.reset()
             
-            while not done:
-                action_logits = self.policy_network(torch.Tensor(observation))
-                action_probs = F.softmax(action_logits, dim=0).detach().numpy()
-                action = np.random.choice(self.action_dim, p=action_probs)
-                observation, reward, terminated, truncated, info = self.eval_env.step(action)
-                done = terminated or truncated
-                ep_return += reward
+#             while not done:
+#                 action_logits = self.policy_network(torch.Tensor(observation))
+#                 action_probs = F.softmax(action_logits, dim=0).detach().numpy()
+#                 action = np.random.choice(self.action_dim, p=action_probs)
+#                 observation, reward, terminated, truncated, info = self.eval_env.step(action)
+#                 done = terminated or truncated
+#                 ep_return += reward
                
-            ep_returns.append(ep_return)
+#             ep_returns.append(ep_return)
 
-        return np.mean(ep_returns), np.std(ep_returns)
+#         return np.mean(ep_returns), np.std(ep_returns)
 
 
-    def cleanup(self):
-        self.env.close()
-        self.eval_env.close()
+#     def cleanup(self):
+#         self.env.close()
+#         self.eval_env.close()
         
             
 
@@ -170,11 +293,11 @@ class ReinforceNetwork(nn.Module):
 
 if __name__ == "__main__":
     args = parse_args()
+    root_dir = os.path.dirname(os.getcwd())
     exp_name = os.path.basename(__file__).rstrip(".py")
     run_name = f"{args.env_name}__{exp_name}__{args.env_seed}__{int(time.time())}"
-
-    logging = args.use_tensorboard or args.use_wandb
-
+    
+    # Logging setup
     if args.use_wandb:
         wandb.init(
             project=args.wandb_project_name,
@@ -184,50 +307,36 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=False,
             save_code=True,
-            dir="/Users/andrew/dev/deep-rl"
+            dir=root_dir
         )
 
-    if logging:
-        writer = SummaryWriter(log_dir=f"/Users/andrew/dev/deep-rl/runs/{run_name}")
+    writer = None
+    if args.use_tensorboard or args.use_wandb:
+        writer = SummaryWriter(log_dir=f"{root_dir}/runs/{run_name}")
         writer.add_text(
             "hyperparameters",
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
+    
+    # Environment setup
+    env = gym.make(args.env_name)
+    eval_env = gym.make(args.env_name, render_mode='rgb_array')
 
-    agent = ReinforceAgent(args, run_name)
-    ep = 1
-    t0 = time.time()
-    while agent.global_timestep < args.total_timesteps:
-        agent.train_episode()
+    if args.record_video:
+        video_folder = f"{root_dir}/runs/{run_name}/videos"
+        os.makedirs(video_folder, exist_ok=True)
+        eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
 
-        if ep % args.eval_freq == 0:
-            t1 = time.time()
-            print(f"\n{'=' * 16} EPISODE {ep} {'=' * 16}")
-            print(f"Iteration time: {t1 - t0}")
-            t0 = t1
+    # Run REINFORCE algorithm
+    t_start = time.time()
 
-            mean_return, std_return = agent.eval()
-            if logging:
-                writer.add_scalar("eval/mean_return", mean_return, global_step=ep)
-                writer.add_scalar("eval/std_return", std_return, global_step=ep)
+    reinforce(args, env, eval_env, writer=writer)
 
-            print(f"Mean return: {mean_return}\nStd return: {std_return}\nGlobal timestep: {agent.global_timestep}")
+    t_end = time.time()
+    print(f"Total time elapsed: {t_end - t_start}")
 
-        if args.save_model_freq > 0 and ep % args.save_model_freq == 0:
-            model_path = f"/Users/andrew/dev/deep-rl/runs/{run_name}/{exp_name}__ep{str(ep)}.model"
-            agent.save_model(model_path)
-
-        ep += 1
-
-
-    print(f"\n{'=' * 16} FINAL EVAL {'=' * 16}")
-    mean_return, std_return = agent.eval()
-    if logging:
-        writer.add_scalar("eval/mean_return", mean_return,global_step=ep)
-        writer.add_scalar("eval/std_return", std_return, global_step=ep)
-        writer.close()
-
-    print(f"Mean return: {mean_return}\nStd return: {std_return}\nGlobal timestep: {agent.global_timestep}")
-
-    agent.cleanup()
+    # Cleanup
+    env.close()
+    eval_env.close()
+    writer.close()
         

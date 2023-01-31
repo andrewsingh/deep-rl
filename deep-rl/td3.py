@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument("--eval-freq", type=int, default=10000)
     parser.add_argument("--eval-num-episodes", type=int, default=10)
 
-    # Actor and critic hyperparams
+    # Network hyperparams
     parser.add_argument("--actor-hidden-dim", type=int, default=128)
     parser.add_argument("--critic-hidden-dim", type=int, default=128)
     parser.add_argument("--actor-lr", type=float, default=2.5e-4)
