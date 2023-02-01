@@ -60,6 +60,7 @@ def dqn(args, env, eval_env, writer=None):
     state_dim = observation.shape[0]
     num_actions = env.action_space.n
 
+    # Initialize Q networks and replay buffer
     q_network = QNetwork(state_dim, num_actions).to(device)
     target_network = QNetwork(state_dim, num_actions).to(device)
     target_network.load_state_dict(q_network.state_dict())
@@ -77,16 +78,21 @@ def dqn(args, env, eval_env, writer=None):
         ep += 1
         done = False
         observation, info = env.reset()
+        
+        # Run a single episode
         while not done:
             global_timestep += 1
 
             epsilon = get_linear_schedule(args.epsilon_start, args.epsilon_end, int(args.epsilon_anneal_frac * args.total_timesteps), global_timestep)
+
+            # Select action
             if global_timestep < args.start_learning_timestep or random.random() < epsilon:
                 action = env.action_space.sample()
             else:
                 q_values = q_network(torch.Tensor(observation).to(device))
                 action = torch.argmax(q_values).item()
 
+            # Execute action in environment and store transition in replay buffer
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             transition = (observation, action, reward, next_observation, int(terminated or truncated))
@@ -94,29 +100,34 @@ def dqn(args, env, eval_env, writer=None):
 
             if global_timestep >= args.start_learning_timestep:
                 if global_timestep % args.update_freq == 0:
+                    # Sample random minibatch of transitions from replay buffer
                     minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = replay_buffer.sample_minibatch()
                     minibatch_is_terminal = minibatch_is_terminal.astype(bool)
                     
+                    # Calculate Q network targets
                     with torch.no_grad():
                         minibatch_all_q_values = target_network(torch.Tensor(minibatch_next_states).to(device)).cpu().numpy()
                         minibatch_max_q_values = np.amax(minibatch_all_q_values, axis=1)
                         minibatch_targets = minibatch_rewards + (~minibatch_is_terminal * args.gamma * minibatch_max_q_values)
-                        
+                        minibatch_targets_t = torch.Tensor(minibatch_targets).to(device)
+
+                    # Get Q network predictions
                     minibatch_all_preds = q_network(torch.Tensor(minibatch_states).to(device))
                     minibatch_action_preds = minibatch_all_preds[np.arange(len(minibatch_all_preds)), minibatch_actions]
-                    minibatch_targets_t = torch.Tensor(minibatch_targets).to(device)
                     
+                    # Calculate Q network loss and perform gradient descent step
                     loss = F.mse_loss(minibatch_action_preds, minibatch_targets_t, reduction='mean')
-
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
 
+                # Delayed target network update
                 if global_timestep % args.update_target_freq == 0:
                     soft_update_target_network(target_network, q_network, args.tau)
 
             observation = next_observation
 
+            # Evaluation
             if global_timestep % args.eval_freq == 0:
                 t1 = time.time()
                 print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
@@ -256,11 +267,12 @@ if __name__ == "__main__":
         os.makedirs(video_folder, exist_ok=True)
         eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
 
-    # Run DQN algorithm
+    
     t_start = time.time()
 
+    # Run DQN algorithm
     dqn(args, env, eval_env, writer=writer)
-
+    
     t_end = time.time()
     print(f"Total time elapsed: {t_end - t_start}")
 

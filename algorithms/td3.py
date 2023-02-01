@@ -62,7 +62,7 @@ def td3(args, env, eval_env, writer=None):
     state_dim = observation.shape[0]
     action_dim = env.action_space.shape[0]
 
-    # Initialization of actor-critic networks and replay buffer
+    # Initialize actor and critic networks and replay buffer
     actor = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim).to(device)
     critic1 = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
     critic2 = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
@@ -88,9 +88,12 @@ def td3(args, env, eval_env, writer=None):
         ep += 1
         done = False
         observation, info = env.reset()
+
+        # Run a single episode
         while not done:
             global_timestep += 1
 
+            # Select action
             if global_timestep < args.start_learning_timestep:
                 action = env.action_space.sample()
             else:
@@ -99,15 +102,18 @@ def td3(args, env, eval_env, writer=None):
                     action_noise = np.random.normal(loc=0.0, scale=args.exploration_noise_scale, size=action_dim).clip(-args.exploration_noise_scale, args.exploration_noise_scale)
                     action = (action + action_noise).clip(-1, 1)
             
+            # Execute action in environment and store transition in replay buffer
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             transition = (observation, action, reward, next_observation, int(terminated or truncated))
             replay_buffer.store_transition(transition)
 
             if global_timestep >= args.start_learning_timestep:
+                # Sample random minibatch of transitions from replay buffer
                 minibatch_states, minibatch_actions, minibatch_rewards,minibatch_next_states,minibatch_is_terminal = replay_buffer.sample_minibatch()
                 minibatch_is_terminal = minibatch_is_terminal.astype(bool)
 
+                # Calculate critic targets
                 with torch.no_grad():
                     minibatch_next_states_t = torch.Tensor(minibatch_next_states).to(device)
                     minibatch_next_actions = actor_target(minibatch_next_states_t)
@@ -117,29 +123,36 @@ def td3(args, env, eval_env, writer=None):
                     minibatch_target_q_values1 = critic1_target(torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)).squeeze().cpu().numpy()
                     minibatch_target_q_values2 = critic2_target(torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)).squeeze().cpu().numpy()
 
+                    # Take the minimum of the two critics (clipped double Q-learning)
                     minibatch_target_q_values = np.minimum(minibatch_target_q_values1, minibatch_target_q_values2)
                     minibatch_q_targets = minibatch_rewards + (~minibatch_is_terminal * args.gamma * minibatch_target_q_values)
-
-                minibatch_q_targets_t = torch.Tensor(minibatch_q_targets).to(device)
+                    minibatch_q_targets_t = torch.Tensor(minibatch_q_targets).to(device)
             
+                # Update each of the critics
                 for critic, critic_optimizer in [(critic1, critic1_optimizer), (critic2, critic2_optimizer)]:
+                    # Get critic predictions 
                     minibatch_q_preds = critic(torch.Tensor(np.concatenate((minibatch_states, minibatch_actions), axis=1)).to(device)).squeeze()
 
+                    # Calculate critic loss and perform gradient descent step
                     critic_loss = F.mse_loss(minibatch_q_preds, minibatch_q_targets_t, reduction='mean')
                     critic_optimizer.zero_grad()
                     critic_loss.backward()
                     critic_optimizer.step()
 
+                # Delayed policy update
                 if global_timestep % args.actor_freq == 0:
+                    # Get first critic's value predictions of actor's action predictions
                     minibatch_states_t = torch.Tensor(minibatch_states).to(device)
                     actor_action_preds = actor(minibatch_states_t)
                     critic1_value_preds = critic1(torch.cat((minibatch_states_t, actor_action_preds), dim=1).to(device))
 
+                    # Calculate actor loss and perform gradient descent step
                     actor_loss = -critic1_value_preds.mean()
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
                     actor_optimizer.step()
 
+                # Delayed target network updates
                 if global_timestep % args.update_target_freq == 0:
                     soft_update_target_network(actor_target, actor, args.tau)
                     soft_update_target_network(critic1_target, critic, args.tau)
@@ -147,6 +160,7 @@ def td3(args, env, eval_env, writer=None):
 
             observation = next_observation
 
+            # Evaluation
             if global_timestep % args.eval_freq == 0:
                 t1 = time.time()
                 print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
@@ -295,9 +309,9 @@ if __name__ == "__main__":
         os.makedirs(video_folder, exist_ok=True)
         eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
 
-    # Run TD3 algorithm
     t_start = time.time()
 
+    # Run TD3 algorithm
     td3(args, env, eval_env, writer=writer)
 
     t_end = time.time()

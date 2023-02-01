@@ -5,3 +5,4 @@
 runs/*
 notebooks/*
 wandb/*
+plots/*

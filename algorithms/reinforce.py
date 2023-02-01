@@ -55,6 +55,7 @@ def reinforce(args, env, eval_env, writer=None):
     state_dim = observation.shape[0]
     num_actions = env.action_space.n
 
+    # Initialize policy and optional baseline
     policy_network = ReinforceNetwork(state_dim, num_actions, args.policy_hidden_dim).to(device)
     policy_optimizer = torch.optim.Adam(policy_network.parameters(), lr=args.policy_lr)
 
@@ -71,6 +72,7 @@ def reinforce(args, env, eval_env, writer=None):
         done = False
         observation, info = env.reset()
 
+        # Generate an episode
         states = []
         selected_action_log_probs = []
         rewards = []
@@ -89,38 +91,41 @@ def reinforce(args, env, eval_env, writer=None):
 
         ep_len = len(rewards)
 
+        # Calculate discounted returns
         discounted_returns = np.zeros(ep_len)
         discounted_returns[ep_len-1] = rewards[ep_len-1]
-        
         for t in range(ep_len-2, -1, -1):
             discounted_returns[t] = rewards[t] + (args.gamma * discounted_returns[t+1])
 
+        # Subtract state values from returns if using a baseline
         if args.use_baseline:
             state_values = baseline_network(torch.Tensor(np.array(states)).to(device)).squeeze()
             deltas = torch.Tensor(discounted_returns).to(device) - state_values.detach()
         else:
             deltas = torch.Tensor(discounted_returns).to(device)
 
+        # Calculate policy loss for each timestep
         policy_losses = []
         policy_loss_discount = 1
-
         for t in range(ep_len):
             policy_loss = policy_loss_discount * deltas[t] * -selected_action_log_probs[t]
             policy_losses.append(policy_loss)
             policy_loss_discount *= args.gamma
 
+        # Calculate overall policy loss and perform gradient descent step 
         episode_policy_loss = torch.stack(policy_losses).sum()
-        
         policy_optimizer.zero_grad()
         episode_policy_loss.backward()
         policy_optimizer.step()
 
+        # Calculate optional baseline loss and perform gradient descent step 
         if args.use_baseline:
             baseline_loss = torch.dot(deltas, -state_values)
             baseline_optimizer.zero_grad()
             baseline_loss.backward()
             baseline_optimizer.step()
 
+        # Evaluation
         if global_timestep >= next_eval_timestep:
             t1 = time.time()
             print(f"\n{'=' * 16} TIMESTEP {global_timestep} {'=' * 16}")
@@ -213,9 +218,9 @@ if __name__ == "__main__":
         os.makedirs(video_folder, exist_ok=True)
         eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
 
-    # Run REINFORCE algorithm
     t_start = time.time()
 
+    # Run REINFORCE algorithm
     reinforce(args, env, eval_env, writer=writer)
 
     t_end = time.time()
