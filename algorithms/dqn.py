@@ -121,7 +121,7 @@ def dqn(args, env, eval_env, writer=None):
                     loss.backward()
                     optimizer.step()
 
-                # Delayed target network update
+                # Delayed target network updates
                 if global_timestep % args.update_target_freq == 0:
                     soft_update_target_network(target_network, q_network, args.tau)
 
@@ -272,7 +272,7 @@ if __name__ == "__main__":
 
     # Run DQN algorithm
     dqn(args, env, eval_env, writer=writer)
-    
+
     t_end = time.time()
     print(f"Total time elapsed: {t_end - t_start}")
 

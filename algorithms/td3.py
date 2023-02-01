@@ -99,6 +99,7 @@ def td3(args, env, eval_env, writer=None):
             else:
                 with torch.no_grad():
                     action = actor(torch.Tensor(observation).to(device)).cpu().numpy()
+                    # Add exploration noise
                     action_noise = np.random.normal(loc=0.0, scale=args.exploration_noise_scale, size=action_dim).clip(-args.exploration_noise_scale, args.exploration_noise_scale)
                     action = (action + action_noise).clip(-1, 1)
             
@@ -117,6 +118,7 @@ def td3(args, env, eval_env, writer=None):
                 with torch.no_grad():
                     minibatch_next_states_t = torch.Tensor(minibatch_next_states).to(device)
                     minibatch_next_actions = actor_target(minibatch_next_states_t)
+                    # Add noise to target actions (target policy smoothing regularization)
                     minibatch_next_actions_noise = torch.normal(mean=0.0, std=args.target_noise_scale, size=minibatch_next_actions.shape).clamp(-args.target_noise_clip, args.target_noise_clip).to(device)
                     minibatch_next_actions = (minibatch_next_actions + minibatch_next_actions_noise).clamp(-1, 1)
 
@@ -139,7 +141,7 @@ def td3(args, env, eval_env, writer=None):
                     critic_loss.backward()
                     critic_optimizer.step()
 
-                # Delayed policy update
+                # Delayed policy updates
                 if global_timestep % args.actor_freq == 0:
                     # Get first critic's value predictions of actor's action predictions
                     minibatch_states_t = torch.Tensor(minibatch_states).to(device)
