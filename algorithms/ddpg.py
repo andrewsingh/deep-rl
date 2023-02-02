@@ -51,7 +51,7 @@ def parse_args():
     return args
 
 
-
+# DDPG algorithm
 def ddpg(args, env, eval_env, writer=None):
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     print(f"Device: {device}")

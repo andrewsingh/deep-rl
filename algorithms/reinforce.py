@@ -46,7 +46,7 @@ def parse_args():
     return args
 
 
-
+# REINFORCE algorithm
 def reinforce(args, env, eval_env, writer=None):
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     print(f"Device: {device}")
