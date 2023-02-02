@@ -59,12 +59,14 @@ def ddpg(args, env, eval_env, writer=None):
     observation, info = env.reset(seed=args.env_seed)
     state_dim = observation.shape[0]
     action_dim = env.action_space.shape[0]
-
+    action_scale = (env.action_space.high - env.action_space.low) / 2.0
+    action_bias = (env.action_space.high + env.action_space.low) / 2.0
+    
     # Initialize actor and critic networks and replay buffer
-    actor = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim).to(device)
+    actor = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim, action_scale, action_bias).to(device)
     critic = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
     
-    actor_target = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim).to(device)
+    actor_target = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim, action_scale, action_bias).to(device)
     critic_target = CriticNetwork(state_dim + action_dim, 1, args.critic_hidden_dim).to(device)
 
     actor_target.load_state_dict(actor.state_dict())
@@ -192,8 +194,10 @@ def soft_update_target_network(target_network, local_network, tau):
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim):
+    def __init__(self, input_dim, output_dim, hidden_dim, action_scale, action_bias):
         super().__init__()
+        self.register_buffer("action_scale", torch.Tensor(action_scale))
+        self.register_buffer("action_bias", torch.Tensor(action_bias))
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim, bias=True),
             nn.ReLU(),
@@ -204,7 +208,7 @@ class ActorNetwork(nn.Module):
         )
     
     def forward(self, x):
-        return self.model(x)
+        return (self.model(x) * self.action_scale) + self.action_bias
 
 
 
