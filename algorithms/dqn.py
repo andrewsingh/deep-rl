@@ -46,6 +46,7 @@ def parse_args():
     parser.add_argument("--wandb-project-name", type=str, default="deep-rl")
     parser.add_argument("--wandb-entity-name", type=str, default="andrew99")
     parser.add_argument("--record-video", action='store_true')
+    parser.add_argument("--record-video-eval-freq", type=int, default=5)
 
     args = parser.parse_args()
     return args
@@ -265,7 +266,7 @@ if __name__ == "__main__":
     if args.record_video:
         video_folder = f"{root_dir}/runs/{run_name}/videos"
         os.makedirs(video_folder, exist_ok=True)
-        eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % args.eval_num_episodes == 0)
+        eval_env = gym.wrappers.RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % (args.eval_num_episodes * args.record_video_eval_freq) == 0)
 
     
     t_start = time.time()
