@@ -19,4 +19,23 @@ My implementations of popular deep reinforcement algorithms. Each algorithm is i
 
 
 ### DDPG vs. TD3 on Half Cheetah
-![ddpg-vs-td3-halfcheetah-resized](https://user-images.githubusercontent.com/20130365/216112056-788ae798-1f3e-4462-9ac2-288dd756a6bf.png)
+![ddpg-vs_td3-halfcheetah-020923-resized](https://user-images.githubusercontent.com/20130365/217992777-e561fcbb-828f-4783-96f6-7389a20e964f.png)
+
+
+### Videos of TD3 on Half Cheetah
+
+**5K timesteps into training (0.05% completed)**
+
+https://user-images.githubusercontent.com/20130365/217993702-78d5b126-ef52-4247-85fb-5b38b4cc033c.mp4
+
+
+**205K timesteps into training (20.5% completed)**
+
+https://user-images.githubusercontent.com/20130365/217993712-07d399ed-b7f2-4062-88b1-31c96fdac790.mp4
+
+
+**955K timesteps into training (95.5% completed)**
+
+https://user-images.githubusercontent.com/20130365/217993727-dc62ef94-bb18-42b8-992e-e9bb5c559820.mp4
+
+
