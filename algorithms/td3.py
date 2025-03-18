@@ -16,7 +16,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # Experiment settings
-    parser.add_argument("--env-name", type=str, default="HalfCheetah-v2")
+    parser.add_argument("--env-name", type=str, default="HalfCheetah-v5")
     parser.add_argument("--env-seed", type=int, default=42)
     parser.add_argument("--total-timesteps", type=int, default=1000000)
     parser.add_argument("--eval-freq", type=int, default=10000)
@@ -114,7 +114,7 @@ def td3(args, env, eval_env, writer=None):
 
             if global_timestep >= args.start_learning_timestep:
                 # Sample random minibatch of transitions from replay buffer
-                minibatch_states, minibatch_actions, minibatch_rewards,minibatch_next_states,minibatch_is_terminal = replay_buffer.sample_minibatch()
+                minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = replay_buffer.sample_minibatch()
                 minibatch_is_terminal = minibatch_is_terminal.astype(bool)
 
                 # Calculate critic targets

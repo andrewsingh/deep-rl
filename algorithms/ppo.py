@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--num-iters", type=int, default=1)
     parser.add_argument("--num-actors", type=int, default=1)
     parser.add_argument("--rollout-steps", type=int, default=100)
-    # parser.add_argument("--eval-freq", type=int, default=10000)
+    parser.add_argument("--eval-freq", type=int, default=5)
     parser.add_argument("--eval-num-episodes", type=int, default=10)
 
     # Policy and baseline hyperparams
@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument("--wandb-project-name", type=str, default="deep-rl")
     parser.add_argument("--wandb-entity-name", type=str, default="andrew99")
     parser.add_argument("--record-video", action='store_true')
-    parser.add_argument("--record-video-eval-freq", type=int, default=5)
+    parser.add_argument("--record-video-eval-freq", type=int, default=2)
 
     args = parser.parse_args()
     return args
@@ -69,7 +69,6 @@ def ppo(args, envs, eval_env, writer=None):
     global_timestep = 0
     
     for iter in range(args.num_iters):
-        print(f"Iteration {iter + 1}")
         t0 = time.time()
         obs, infos = envs.reset(seed=args.env_seed)
         rollout_states = torch.zeros((args.rollout_steps, args.num_actors) + state_dim).to(device)
@@ -123,10 +122,9 @@ def ppo(args, envs, eval_env, writer=None):
     
         # Optimization
         print("Optimizing actor and critic")
-        for epoch in range(args.epochs):
-            print(f"Epoch {epoch + 1}")
+        for epoch in tqdm(range(args.epochs)):
             indices = torch.randperm(data_size)
-            for i in tqdm(range(num_batches)):
+            for i in range(num_batches):
                 batch_indices = indices[i * args.batch_size : (i + 1) * args.batch_size]
                 batch_states = data_states[batch_indices]
                 batch_actions = data_actions[batch_indices]
@@ -156,13 +154,14 @@ def ppo(args, envs, eval_env, writer=None):
         print(f"\n{'=' * 16} ITERATION {iter + 1} {'=' * 16}")
         print(f"Iteration time: {t1 - t0}")
 
-        mean_return, std_return = evaluate(eval_env, actor, args.eval_num_episodes)
+        if iter == 0 or (iter + 1) % args.eval_freq == 0:
+            mean_return, std_return = evaluate(eval_env, actor, args.eval_num_episodes)
 
-        if writer != None:
-            writer.add_scalar("eval/mean_return", mean_return, global_step=global_timestep)
-            writer.add_scalar("eval/std_return", std_return, global_step=global_timestep)
+            if writer != None:
+                writer.add_scalar("eval/mean_return", mean_return, global_step=global_timestep)
+                writer.add_scalar("eval/std_return", std_return, global_step=global_timestep)
 
-        print(f"Mean return: {mean_return}\nStd return: {std_return}")
+            print(f"Mean return: {mean_return}\nStd return: {std_return}")
 
         # next_eval_timestep += args.eval_freq
             
