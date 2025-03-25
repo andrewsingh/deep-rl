@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument("--minibatch-size", type=int, default=128)
     parser.add_argument("--update-freq", type=int, default=10)
     parser.add_argument("--update-target-freq", type=int, default=500)
+    parser.add_argument("--hidden-dim", type=int, default=120)
+
 
     # Other hyperparams
     parser.add_argument("--epsilon-start", type=float, default=1)
@@ -62,8 +64,8 @@ def dqn(args, env, eval_env, writer=None):
     num_actions = env.action_space.n
 
     # Initialize Q networks and replay buffer
-    q_network = QNetwork(state_dim, num_actions).to(device)
-    target_network = QNetwork(state_dim, num_actions).to(device)
+    q_network = QNetwork(state_dim, args.hidden_dim, num_actions).to(device)
+    target_network = QNetwork(state_dim, args.hidden_dim, num_actions).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     replay_buffer = ReplayBuffer(state_dim, args.replay_capacity, args.minibatch_size)
@@ -183,14 +185,14 @@ def get_linear_schedule(start, end, duration, t):
 
 
 class QNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Linear(input_dim, 120, bias=True),
+            nn.Linear(input_dim, hidden_dim, bias=True),
             nn.ReLU(),
-            nn.Linear(120, 84, bias=True),
+            nn.Linear(hidden_dim, hidden_dim, bias=True),
             nn.ReLU(),
-            nn.Linear(84, output_dim, bias=True),
+            nn.Linear(hidden_dim, output_dim, bias=True),
         )
     
     def forward(self, x):

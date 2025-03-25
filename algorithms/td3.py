@@ -59,6 +59,8 @@ def td3(args, env, eval_env, writer=None):
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     print(f"Device: {device}")
 
+    actor_updates = 0
+
     observation, info = env.reset(seed=args.env_seed)
     state_dim = observation.shape[0]
     action_dim = env.action_space.shape[0]
@@ -144,6 +146,9 @@ def td3(args, env, eval_env, writer=None):
                     critic_loss.backward()
                     critic_optimizer.step()
 
+                    if writer != None:
+                        writer.add_scalar("train/critic_loss", critic_loss.abs(), global_step=global_timestep)
+
                 # Delayed policy updates
                 if global_timestep % args.actor_freq == 0:
                     # Get first critic's value predictions of actor's action predictions
@@ -156,6 +161,10 @@ def td3(args, env, eval_env, writer=None):
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
                     actor_optimizer.step()
+                    actor_updates += 1
+
+                    if writer != None:
+                        writer.add_scalar("train/actor_loss", actor_loss, global_step=global_timestep)
 
                 # Delayed target network updates
                 if global_timestep % args.update_target_freq == 0:
@@ -180,6 +189,8 @@ def td3(args, env, eval_env, writer=None):
                         writer.add_scalar("eval/std_return", std_return, global_step=global_timestep)
 
                     print(f"Mean return: {mean_return}\nStd return: {std_return}\nReplay buffer size: {replay_buffer.current_size}")
+                    print(f"Timesteps per actor update: {(global_timestep - args.start_learning_timestep) / actor_updates}")
+                    print(f"Time elapsed: {time.time() - t_start}")
                 else:
                     print(f"Skipping eval - still filling the replay buffer.\nReplay buffer size: {replay_buffer.current_size}")
 
