@@ -12,7 +12,7 @@ import pdb
 
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.normal import Normal
-from tqdm import tqdm
+from torch.distributions.categorical import Categorical
 
 
 def parse_args():
@@ -31,7 +31,6 @@ def parse_args():
     # Policy and baseline hyperparams
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2.5e-4)
-    # parser.add_argument("--critic-lr", type=float, default=2.5e-4)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--value-coeff", type=float, default=0.5)
@@ -65,16 +64,20 @@ def ppo(args, envs, eval_env, writer=None):
   
     state_dim = envs.single_observation_space.shape
     action_dim = envs.single_action_space.shape
+    num_actions = envs.single_action_space.n
+    is_discrete = envs.single_action_space.__class__.__name__ == "Discrete"
 
-    # actor = Actor(state_dim[0], action_dim[0], args.hidden_dim).to(device)
-    # critic = Critic(state_dim[0], 1, args.hidden_dim).to(device)
-    agent = Agent(state_dim[0], action_dim[0], args.hidden_dim).to(device)
+    print(f"Env name: {args.env_name}\nAction space: {envs.single_action_space}\nAction space type: {'Discrete' if is_discrete else 'Continuous'}")
+
+    if is_discrete:
+        agent = DiscreteAgent(state_dim[0], num_actions, args.hidden_dim).to(device)
+    else:
+        agent = ContinuousAgent(state_dim[0], action_dim[0], args.hidden_dim)
+
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    # critic_optimizer = torch.optim.Adam(critic.parameters(), lr=args.critic_lr)
 
     global_timestep = 0
     next_eval_timestep = args.eval_freq
-    # actor_updates = 0
 
     total_steps_per_iter = args.num_actors * args.rollout_steps
 
@@ -87,7 +90,7 @@ def ppo(args, envs, eval_env, writer=None):
     for iter in range(num_iters):
         t0 = time.time()
         rollout_states = torch.zeros((args.rollout_steps, args.num_actors) + state_dim).to(device)
-        rollout_actions = torch.zeros((args.rollout_steps, args.num_actors) + action_dim).to(device)
+        rollout_actions = torch.zeros((args.rollout_steps, args.num_actors) + (action_dim if not is_discrete else ())).to(device)
         rollout_logprobs = torch.zeros((args.rollout_steps, args.num_actors)).to(device)
         rollout_entropies = torch.zeros((args.rollout_steps, args.num_actors)).to(device)
         rollout_values = torch.zeros((args.rollout_steps, args.num_actors)).to(device)
@@ -102,13 +105,11 @@ def ppo(args, envs, eval_env, writer=None):
             rollout_states[step] = obs
             actions, logprobs, entropies = agent.get_action(obs)
             values = agent.get_value(obs)
-            # pdb.set_trace()
             obs, rewards, terms, truncs, infos = envs.step(actions.cpu().numpy())
             dones = terms | truncs
             rollout_actions[step] = actions
             rollout_logprobs[step] = logprobs
             rollout_entropies[step] = entropies
-            # pdb.set_trace()
             rollout_values[step] = values.squeeze()
             rollout_rewards[step] = torch.from_numpy(rewards).float().to(device)
             rollout_dones[step] = torch.from_numpy(dones).float().to(device)
@@ -119,8 +120,8 @@ def ppo(args, envs, eval_env, writer=None):
         rollout_value_targets =  torch.zeros((args.rollout_steps, args.num_actors))
 
         next_non_terminal = 1.0 - rollout_dones[-1]
-        rollout_advantages[-1] = (rewards[-1] + (args.gamma * last_values *next_non_terminal) - values[-1])
-        rollout_value_targets[-1] = rewards[-1] + (args.gamma * last_values * next_non_terminal)
+        rollout_advantages[-1] = (rollout_rewards[-1] + (args.gamma * last_values * next_non_terminal) - rollout_values[-1])
+        rollout_value_targets[-1] = rollout_rewards[-1] + (args.gamma * last_values * next_non_terminal)
         
         for step in range(args.rollout_steps - 2, -1, -1):
             next_non_terminal = 1.0 - rollout_dones[step]
@@ -132,7 +133,7 @@ def ppo(args, envs, eval_env, writer=None):
             rollout_value_targets = rollout_advantages + rollout_values
         
         data_states = rollout_states.reshape((-1,) + state_dim)
-        data_actions = rollout_actions.reshape((-1,) + action_dim)
+        data_actions = rollout_actions.reshape(((-1,) + action_dim) if not is_discrete else -1)
         data_logprobs = rollout_logprobs.reshape(-1).detach()
         data_advantages = rollout_advantages.reshape(-1).detach()
         if args.normalize_advantages:
@@ -144,13 +145,15 @@ def ppo(args, envs, eval_env, writer=None):
         clip_ratios_by_epoch = {}
         divergence_by_epoch = {}
 
-        # if writer != None:
-        #     writer.add_scalar("train/rollout_entropy", rollout_entropies.mean().detach(), global_step=global_timestep)
-
         r1 = time.time()
+
+        if writer != None:
+            writer.add_scalar("train/mean_reward", rollout_rewards.mean(), global_step=global_timestep)
+            writer.add_scalar("train/std_reward", rollout_rewards.std(), global_step=global_timestep)
+            writer.add_scalar("train/mean_value_target", rollout_value_targets.mean(), global_step=global_timestep)
+            writer.add_scalar("train/std_value_target", rollout_value_targets.std(), global_step=global_timestep)
     
         # Optimization
-        # print("Optimizing actor and critic")
         for epoch in range(args.epochs):
             clip_ratios_by_epoch[epoch] = []
             divergence_by_epoch[epoch] = []
@@ -180,21 +183,16 @@ def ppo(args, envs, eval_env, writer=None):
                 
                 optimizer.zero_grad()
                 overall_loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                grad_norm_before_clip = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
-                # actor_optimizer.zero_grad()
-                # actor_loss.backward()
-                # actor_optimizer.step()
-                # actor_updates += 1
-
-                # critic_optimizer.zero_grad()
-                # critic_loss.backward()
-                # critic_optimizer.step()
 
                 if writer != None:
                     writer.add_scalar("train/actor_loss", actor_loss, global_step=global_timestep)
                     writer.add_scalar("train/critic_loss", critic_loss, global_step=global_timestep)
                     writer.add_scalar("train/entropy", entropy, global_step=global_timestep)
+                    writer.add_scalar("train/grad_norm_before_clip", grad_norm_before_clip, global_step=global_timestep)
+                    writer.add_scalar("train/batch_values", batch_values.mean(), global_step=global_timestep)
+                    writer.add_scalar("train/batch_value_targets", batch_value_targets.mean(), global_step=global_timestep)
                     
 
         r2 = time.time()
@@ -216,22 +214,10 @@ def ppo(args, envs, eval_env, writer=None):
                 
             next_eval_timestep += args.eval_freq
 
-
             print(f"Rollout time: {r1 - r0}")
             print(f"Optimization time: {r2 - r1}")
             print(f"Ratio: {(r1 - r0) / (r2 - r1)}")
             
-            # print(f"Steps per actor update: {global_timestep / actor_updates}")                
-
-            # print("\nClip ratios by epoch:")
-            # for epoch in [0, args.epochs - 1]:
-            #     print(f"{epoch}: {np.mean(clip_ratios_by_epoch[epoch])}")
-
-            # print("\nDivergence by epoch:")
-            # for epoch in [0, args.epochs - 1]:
-            #     print(f"{epoch}: Mean: {np.mean(divergence_by_epoch[epoch])}, Std: {np.std(divergence_by_epoch[epoch])}")
-            # print(f"First batch of first epoch: {divergence_by_epoch[0][0]}\n")
-
             if writer != None:
                 writer.add_scalar("train/mean_clip_fraction_first_epoch", np.mean(clip_ratios_by_epoch[0]), global_step=global_timestep)
                 writer.add_scalar("train/mean_clip_fraction_last_epoch", np.mean(clip_ratios_by_epoch[args.epochs - 1]), global_step=global_timestep)
@@ -262,7 +248,38 @@ def evaluate(eval_env, agent, num_episodes, device="cpu"):
 
       
 
-class Agent(nn.Module):
+class DiscreteAgent(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim):
+        super().__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=True),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim, bias=True),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, output_dim, bias=True),
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=True),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim, bias=True),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1, bias=True),
+        )
+
+    def get_action(self, x, action=None):
+        action_logits = self.actor(x)
+        probs = Categorical(logits=action_logits)
+        
+        if action is None:
+            action = probs.sample()
+       
+        return action, probs.log_prob(action), probs.entropy()
+
+    def get_value(self, x):
+        return self.critic(x)
+    
+
+class ContinuousAgent(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim):
         super().__init__()
         self.actor_mean = nn.Sequential(
@@ -296,46 +313,6 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(x)
 
-    
-
-# class Actor(nn.Module):
-#     def __init__(self, input_dim, output_dim, hidden_dim):
-#         super().__init__()
-#         self.actor_mean = nn.Sequential(
-#             nn.Linear(input_dim, hidden_dim, bias=True),
-#             nn.Tanh(),
-#             nn.Linear(hidden_dim, hidden_dim, bias=True),
-#             nn.Tanh(),
-#             nn.Linear(hidden_dim, output_dim, bias=True),
-#         )
-#         self.actor_logstd = nn.Parameter(torch.zeros(1, output_dim))
-    
-#     def forward(self, x, action=None):
-#         action_mean = self.actor_mean(x)
-#         action_logstd = self.actor_logstd.expand_as(action_mean)
-        
-#         action_std = torch.exp(action_logstd)
-#         probs = Normal(action_mean, action_std)
-        
-#         if action is None:
-#             action = probs.sample()
-       
-#         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1)
-
-
-# class Critic(nn.Module):
-#     def __init__(self, input_dim, output_dim, hidden_dim):
-#         super().__init__()
-#         self.critic = nn.Sequential(
-#             nn.Linear(input_dim, hidden_dim, bias=True),
-#             nn.Tanh(),
-#             nn.Linear(hidden_dim, hidden_dim, bias=True),
-#             nn.Tanh(),
-#             nn.Linear(hidden_dim, output_dim, bias=True),
-#         )
-    
-#     def forward(self, x):
-#         return self.critic(x)
 
 
 if __name__ == "__main__":
