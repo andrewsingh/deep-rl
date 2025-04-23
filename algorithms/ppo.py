@@ -64,13 +64,12 @@ def ppo(args, envs, eval_env, writer=None):
   
     state_dim = envs.single_observation_space.shape
     action_dim = envs.single_action_space.shape
-    num_actions = envs.single_action_space.n
     is_discrete = envs.single_action_space.__class__.__name__ == "Discrete"
 
     print(f"Env name: {args.env_name}\nAction space: {envs.single_action_space}\nAction space type: {'Discrete' if is_discrete else 'Continuous'}")
 
     if is_discrete:
-        agent = DiscreteAgent(state_dim[0], num_actions, args.hidden_dim).to(device)
+        agent = DiscreteAgent(state_dim[0], envs.single_action_space.n, args.hidden_dim).to(device)
     else:
         agent = ContinuousAgent(state_dim[0], action_dim[0], args.hidden_dim)
 

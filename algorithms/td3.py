@@ -28,8 +28,7 @@ def parse_args():
     parser.add_argument("--actor-lr", type=float, default=2.5e-4)
     parser.add_argument("--critic-lr", type=float, default=2.5e-4)
     parser.add_argument("--minibatch-size", type=int, default=128)
-    parser.add_argument("--actor-freq", type=int, default=2)
-    parser.add_argument("--update-target-freq", type=int, default=2)
+    parser.add_argument("--update-freq", type=int, default=2)
 
     # Other hyperparams
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -66,6 +65,8 @@ def td3(args, env, eval_env, writer=None):
     action_dim = env.action_space.shape[0]
     action_scale = (env.action_space.high - env.action_space.low) / 2.0
     action_bias = (env.action_space.high + env.action_space.low) / 2.0
+
+    action_scale_t = torch.Tensor(action_scale).to(device)
 
     # Initialize actor and critic networks and replay buffer
     actor = ActorNetwork(state_dim, action_dim, args.actor_hidden_dim, action_scale, action_bias).to(device)
@@ -105,8 +106,8 @@ def td3(args, env, eval_env, writer=None):
                 with torch.no_grad():
                     action = actor(torch.Tensor(observation).to(device)).cpu().numpy()
                     # Add exploration noise
-                    action_noise = np.random.normal(loc=0.0, scale=args.exploration_noise_scale, size=action_dim).clip(-args.exploration_noise_scale, args.exploration_noise_scale)
-                    action = (action + action_noise).clip(-1, 1)
+                    action_noise = np.random.normal(loc=0.0, scale=args.exploration_noise_scale, size=action_dim).clip(-args.exploration_noise_clip, args.exploration_noise_clip) * action_scale
+                    action = (action + action_noise).clip(env.action_space.low, env.action_space.high)
             
             # Execute action in environment and store transition in replay buffer
             next_observation, reward, terminated, truncated, info = env.step(action)
@@ -117,22 +118,22 @@ def td3(args, env, eval_env, writer=None):
             if global_timestep >= args.start_learning_timestep:
                 # Sample random minibatch of transitions from replay buffer
                 minibatch_states, minibatch_actions, minibatch_rewards, minibatch_next_states, minibatch_is_terminal = replay_buffer.sample_minibatch()
-                minibatch_is_terminal = minibatch_is_terminal.astype(bool)
 
                 # Calculate critic targets
                 with torch.no_grad():
                     minibatch_next_states_t = torch.Tensor(minibatch_next_states).to(device)
                     minibatch_next_actions = actor_target(minibatch_next_states_t)
                     # Add noise to target actions (target policy smoothing regularization)
-                    minibatch_next_actions_noise = torch.normal(mean=0.0, std=args.target_noise_scale, size=minibatch_next_actions.shape).clamp(-args.target_noise_clip, args.target_noise_clip).to(device)
-                    minibatch_next_actions = (minibatch_next_actions + minibatch_next_actions_noise).clamp(-1, 1)
+                    minibatch_next_actions_noise = torch.normal(mean=0.0, std=args.target_noise_scale, size=minibatch_next_actions.shape).clamp(-args.target_noise_clip, args.target_noise_clip) * action_scale_t
+                    minibatch_next_actions = (minibatch_next_actions + minibatch_next_actions_noise).clamp(torch.Tensor(env.action_space.low), torch.Tensor(env.action_space.high))
+                    minibatch_next_state_actions = torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)
 
-                    minibatch_target_q_values1 = critic1_target(torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)).squeeze().cpu().numpy()
-                    minibatch_target_q_values2 = critic2_target(torch.cat((minibatch_next_states_t, minibatch_next_actions), dim=1)).squeeze().cpu().numpy()
+                    minibatch_target_q_values1 = critic1_target(minibatch_next_state_actions).squeeze()
+                    minibatch_target_q_values2 = critic2_target(minibatch_next_state_actions).squeeze()
 
                     # Take the minimum of the two critics (clipped double Q-learning)
-                    minibatch_target_q_values = np.minimum(minibatch_target_q_values1, minibatch_target_q_values2)
-                    minibatch_q_targets = minibatch_rewards + (~minibatch_is_terminal * args.gamma * minibatch_target_q_values)
+                    minibatch_target_q_values = torch.min(minibatch_target_q_values1, minibatch_target_q_values2)
+                    minibatch_q_targets = minibatch_rewards + ((1 - minibatch_is_terminal) * args.gamma * minibatch_target_q_values.cpu().numpy())
                     minibatch_q_targets_t = torch.Tensor(minibatch_q_targets).to(device)
             
                 # Update each of the critics
@@ -147,10 +148,10 @@ def td3(args, env, eval_env, writer=None):
                     critic_optimizer.step()
 
                     if writer != None:
-                        writer.add_scalar("train/critic_loss", critic_loss.abs(), global_step=global_timestep)
+                        writer.add_scalar("train/critic_loss", critic_loss, global_step=global_timestep)
 
-                # Delayed policy updates
-                if global_timestep % args.actor_freq == 0:
+                # Delayed policy and target updates
+                if global_timestep % args.update_freq == 0:
                     # Get first critic's value predictions of actor's action predictions
                     minibatch_states_t = torch.Tensor(minibatch_states).to(device)
                     actor_action_preds = actor(minibatch_states_t)
@@ -166,11 +167,9 @@ def td3(args, env, eval_env, writer=None):
                     if writer != None:
                         writer.add_scalar("train/actor_loss", actor_loss, global_step=global_timestep)
 
-                # Delayed target network updates
-                if global_timestep % args.update_target_freq == 0:
                     soft_update_target_network(actor_target, actor, args.tau)
-                    soft_update_target_network(critic1_target, critic, args.tau)
-                    soft_update_target_network(critic2_target, critic, args.tau)
+                    soft_update_target_network(critic1_target, critic1, args.tau)
+                    soft_update_target_network(critic2_target, critic2, args.tau)
 
             observation = next_observation
 
@@ -235,7 +234,7 @@ class ActorNetwork(nn.Module):
             nn.Tanh()
         )
     
-    def forward(self, x):
+    def forward(self, x, eval=False):
         return (self.model(x) * self.action_scale) + self.action_bias
 
 
