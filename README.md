@@ -9,11 +9,10 @@ My implementations of popular deep reinforcement algorithms. Each algorithm is i
 | [Deep Deterministic Policy Gradient (DDPG)](https://arxiv.org/pdf/1509.02971.pdf)                  | Continuous   | [`ddpg.py`](https://github.com/andrewsingh/deep-rl/blob/main/algorithms/ddpg.py)           |
 | [Twin Delayed Deep Deterministic Policy Gradient (TD3)](https://arxiv.org/pdf/1802.09477.pdf)      | Continuous   | [`td3.py`](https://github.com/andrewsingh/deep-rl/blob/main/algorithms/td3.py)             |
 | [Proximal Policy Optimization (PPO)](https://arxiv.org/pdf/1707.06347)      | Both   | [`ppo.py`](https://github.com/andrewsingh/deep-rl/blob/main/algorithms/ppo.py)             |
-
+| [Soft Actor-Critic (SAC)](https://arxiv.org/pdf/1812.05905)      | Continuous   | [`sac.py`](https://github.com/andrewsingh/deep-rl/blob/main/algorithms/sac.py)             |
 
 
 ## Algorithms in Progress
-- [Soft Actor-Critic (SAC)](https://arxiv.org/pdf/1801.01290)
 
 ## Experiments
 ### DQN vs. REINFORCE with / without baseline on Cart Pole
